@@ -1,0 +1,23 @@
+# ESP-IDF Partition Table (Total flash: 8MB)
+# Size reference:
+# - 0x240000 = 2.25MB
+# - 0x130000 = 1.1875MB
+# - 0x4000 = 16KB
+# - 0x2000 = 8KB
+# - 0x1000 = 4KB
+# Name, Type, SubType, Offset, Size, Flags
+# nvs (16KB)
+nvs,data,nvs,0x9000,0x4000,,
+# otadata (8KB)
+otadata,data,ota,0xd000,0x2000,,
+# phy_init (4KB)
+phy_init,data,phy,0xf000,0x1000,,
+#factory,app,factory,0x10000,1M,,
+# factory app (2.25MB)
+factory,app,factory,0x10000,0x240000,,
+# ota_0 app (2.25MB)
+ota_0,app,ota_0,,0x240000,,
+# ota_1 app (2.25MB)
+ota_1,app,ota_1,,0x240000,,
+# storage FATFS (1.1875MB)
+storage,data,fat,,0x130000,,
