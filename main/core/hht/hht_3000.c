@@ -1,7 +1,10 @@
 /*
  * HHT 3000: 문서(HHT2K_UART_ARCHITECTURE.md) 제안 프로토콜.
+ * UART: pinmap Command UART cmd_txd/cmd_rxd (IO13 TX / IO14 RX) → STM32 USART1 PA10/PA9.
+ * STM32 단독 펌(hht2k_standalone) 상수 동기화: STM32/hht2k/src/hht2k_miri_proto.h
  * - 진입: 모드 'H'(0x02) + 서브모드 Sniff('S', 0x02) → STM32 Sniff 루프.
- * - 디스플레이: 0x01(Report) 전송 → "0:<line0>\r\n1:<line1>\r\n" 수신 후 BLE/CLI 갱신.
+ * - 디스플레이: 0x01(Report) → "0:<line0>\r\n1:<line1>\r\n" 수신 후
+ *   **hht_display_push_row_ascii** 로 WB100과 동일하게 BLE(CMD_HHT_MSG_100)·CLI 갱신.
  * - 버튼: 0x02 + 1바이트 mask (hht_keys에서 3000일 때 전송).
  * - 종료: 0x00 전송 후 UART deinit.
  */
@@ -13,16 +16,13 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-#include "core/hht/hht_main.h"
 #include "core/hht/hht_uart.h"
 #include "core/hht/hht_display.h"
 #include "core/hht/hht_keys.h"
-#include "protocol/ble_protocol.h"
-#include "base/console/cli_hht_view.h"
+#include "core/hht/hht_session.h"
 
 static const char *TAG = "hht_3000";
 
-/* 문서 제안 명령 코드 (STM32 Sniff/Drive와 동일) */
 #define HHT3K_CMD_EXIT   0x00
 #define HHT3K_CMD_REPORT 0x01
 #define HHT3K_CMD_BTN    0x02
@@ -31,12 +31,10 @@ static const char *TAG = "hht_3000";
 #define HHT3K_SUB_SNIFF   0x02
 
 #define HHT3K_LINE_LEN 16
-#define HHT3K_ROWS     2
 #define REPORT_PREFIX0 "0:"
 #define REPORT_PREFIX1 "\r\n1:"
 #define REPORT_SUFFIX  "\r\n"
 
-/* Report 응답 수신: flush 후 0x01 전송, 잠시 대기 후 한 번 읽어 파싱 */
 static int hht_3000_read_report_lines(char line0[HHT3K_LINE_LEN + 1], char line1[HHT3K_LINE_LEN + 1])
 {
     uint8_t buf[96];
@@ -78,51 +76,66 @@ static int hht_3000_read_report_lines(char line0[HHT3K_LINE_LEN + 1], char line1
     return 0;
 }
 
-static void hht_3000_notify_line(uint8_t row, const char line16[HHT3K_LINE_LEN + 1])
+/** 세션 직후·핸드폰 연결 직후: 첫 Report로 2줄을 BLE에 반드시 올림(WB100 스트림과 동등). */
+static void hht_3000_ble_sync_initial(void)
 {
-    char line20[21];
-    memcpy(line20, line16, HHT3K_LINE_LEN);
-    for (int i = HHT3K_LINE_LEN; i < 20; i++) {
-        line20[i] = ' ';
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    hht_uart_flush_rx();
+    uint8_t cmd = HHT3K_CMD_REPORT;
+    hht_uart_write(&cmd, 1);
+
+    char line0[HHT3K_LINE_LEN + 1];
+    char line1[HHT3K_LINE_LEN + 1];
+    if (hht_3000_read_report_lines(line0, line1) == 0) {
+        hht_display_push_row_ascii(0, line0, HHT3K_LINE_LEN, true);
+        hht_display_push_row_ascii(1, line1, HHT3K_LINE_LEN, true);
+        ESP_LOGI(TAG, "phone BLE: initial 2 lines (Report OK, same path as WB100)");
+        return;
     }
-    line20[20] = '\0';
-#if CONFIG_BT_NIMBLE_ENABLED
-    ble_protocol_send_hht_line(row, line20);
-#endif
-    if (cli_hht_view_is_active()) {
-        cli_hht_view_update_line(row, line20);
-    }
+
+    static const char blank16[] = "                ";
+    hht_display_push_row_ascii(0, blank16, 16, true);
+    hht_display_push_row_ascii(1, blank16, 16, true);
+    ESP_LOGW(TAG, "phone BLE: initial Report parse fail — pushed blank 2x16");
 }
 
 void hht_3000_init(void)
 {
-    ESP_LOGI(TAG, "init (UART1 TX=4 RX=5, protocol 0x01 Report 0x02 BTN)");
+    ESP_LOGI(TAG, "init Command UART IO13/IO14 (UART1→STM32), proto 0x01 Report 0x02+BTN");
     hht_uart_init_3000();
     hht_display_init();
     hht_keys_init();
 }
 
-void hht_3000_start_session(void)
+bool hht_3000_session_open(void)
 {
-    ESP_LOGI(TAG, "start session: mode H + Sniff");
+    ESP_LOGI(TAG, "session open: mode 0x02 + Sniff");
     hht_uart_flush();
-    vTaskDelay(pdMS_TO_TICKS(50));
+    vTaskDelay(pdMS_TO_TICKS(HHT_SESSION_SETTLE_MS));
 
     uint8_t mode[] = { HHT3K_MODE_HHT2K, HHT3K_SUB_SNIFF };
-    hht_uart_write(mode, sizeof(mode));
-    vTaskDelay(pdMS_TO_TICKS(80));
+    int wn = hht_uart_write(mode, sizeof(mode));
+    if (wn < 0 || (size_t)wn != sizeof(mode)) {
+        ESP_LOGW(TAG, "mode write failed (%d)", wn);
+        return false;
+    }
 
-    /* STM32가 "SNIFF; 0x00=exit..." 를 보낼 수 있음: 버림 */
+    vTaskDelay(pdMS_TO_TICKS(HHT_SESSION_3000_AFTER_MODE_MS));
+
     uint8_t discard[64];
-    (void)hht_uart_read(discard, sizeof(discard), 60);
+    (void)hht_uart_read(discard, sizeof(discard), HHT_SESSION_3000_DISCARD_MS);
+
+    hht_3000_ble_sync_initial();
+    return true;
 }
 
-void hht_3000_stop_session(void)
+void hht_3000_session_close(void)
 {
-    ESP_LOGI(TAG, "stop session: send 0x00 exit");
+    ESP_LOGI(TAG, "session close: 0x00 exit + UART deinit");
     uint8_t cmd = HHT3K_CMD_EXIT;
-    hht_uart_write(&cmd, 1);
-    vTaskDelay(pdMS_TO_TICKS(30));
+    (void)hht_uart_write(&cmd, 1);
+    vTaskDelay(pdMS_TO_TICKS(HHT_SESSION_3000_STOP_WAIT_MS));
     hht_uart_flush();
     hht_uart_deinit();
 }
@@ -132,8 +145,6 @@ void hht_3000_stop_session(void)
 void hht_3000_poll(void)
 {
     static int report_tick = 0;
-    static char s_last0[HHT3K_LINE_LEN + 1] = {0};
-    static char s_last1[HHT3K_LINE_LEN + 1] = {0};
 
     report_tick++;
     if (report_tick >= REPORT_INTERVAL_TICKS) {
@@ -145,14 +156,8 @@ void hht_3000_poll(void)
         char line0[HHT3K_LINE_LEN + 1];
         char line1[HHT3K_LINE_LEN + 1];
         if (hht_3000_read_report_lines(line0, line1) == 0) {
-            if (memcmp(line0, s_last0, HHT3K_LINE_LEN) != 0) {
-                memcpy(s_last0, line0, HHT3K_LINE_LEN + 1);
-                hht_3000_notify_line(0, line0);
-            }
-            if (memcmp(line1, s_last1, HHT3K_LINE_LEN) != 0) {
-                memcpy(s_last1, line1, HHT3K_LINE_LEN + 1);
-                hht_3000_notify_line(1, line1);
-            }
+            hht_display_push_row_ascii(0, line0, HHT3K_LINE_LEN, false);
+            hht_display_push_row_ascii(1, line1, HHT3K_LINE_LEN, false);
         }
     }
 

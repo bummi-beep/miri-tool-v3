@@ -198,7 +198,7 @@ void ble_protocol_on_gap_event(const struct ble_gap_event *event) {
 
 void ble_protocol_send_cmd(uint16_t cmd, const uint8_t *payload, size_t payload_len) {
     ESP_LOGI(TAG, "BLE TX : 0x%04x", (unsigned)cmd);
-    ble_protocol_cli_mirror(cmd, payload, payload_len);
+  //  ble_protocol_cli_mirror(cmd, payload, payload_len);
     ble_gatt_server_send_packet(cmd, payload, payload_len);
 }
 
@@ -209,7 +209,7 @@ void ble_protocol_send_hht_line(uint8_t row, const char *line20) {
     uint8_t payload[21];
     payload[0] = row;
     memcpy(&payload[1], line20, 20);
-    ble_protocol_send_cmd(CMD_HHT_MSG_100, payload, sizeof(payload));
+    ble_protocol_send_cmd(ACK_HHT_MSG_100, payload, sizeof(payload));
     ESP_LOGI(TAG, "BLE notify HHT row%d: %.20s", row, line20);
 }
 

@@ -32,7 +32,13 @@
 #define ACK_START_HHT_100                   0x8061
 #define CMD_STOP_HHT_100                    0x0062
 #define ACK_STOP_HHT_100                    0x8062
-#define CMD_HHT_MSG_100                     0x0063
+ //   CMD_HHT_MSG_100     = 0x0063,
+ //   ACK_HHT_MSG_100     = 0x8063,
+
+//#define CMD_HHT_MSG_100                     0x0063
+#define CMD_HHT_MSG_100                     0x8063
+#define ACK_HHT_MSG_100                     0x0063
+
 #define CMD_HHT_BTN                         0x0064
 #define ACK_HHT_BTN                         0x8064
 #define CMD_HHT_PARAMS                      0x0065
@@ -78,6 +84,10 @@
 #define CMD_STOP_HHT_WB100                  0x0202
 #define CMD_START_HHT_3000                  0x0203
 #define CMD_STOP_HHT_3000                   0x0204
+#define ACK_START_HHT_WB100                 0x8201
+#define ACK_STOP_HHT_WB100                  0x8202
+#define ACK_START_HHT_3000                  0x8203
+#define ACK_STOP_HHT_3000                   0x8204
 
 #define CMD_FW_UPLOAD                       0x0600
 #define CMD_FW_UPLOAD_STOP                  0x0601

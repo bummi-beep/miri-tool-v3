@@ -35,10 +35,10 @@ void hht_uart_init(void) {
 
 void hht_uart_init_3000(void) {
     const pinmap_t *pins = pinmap_get();
-    int tx = pins->hht3000_tx;
-    int rx = pins->hht3000_rx;
-    int rts = pins->hht3000_rts >= 0 ? pins->hht3000_rts : UART_PIN_NO_CHANGE;
-    int cts = pins->hht3000_cts >= 0 ? pins->hht3000_cts : UART_PIN_NO_CHANGE;
+    /* HHT-3000 / STM32 hht2k: Command UART (pinmap cmd_txd/cmd_rxd = IO13/IO14).
+     * stm32_update·fw_update_worker 와 동일 물리 링크(UART1 ↔ STM32 USART1). */
+    int tx = pins->cmd_txd;
+    int rx = pins->cmd_rxd;
 
     if (g_hht_uart_ready) {
         uart_driver_delete(UART_NUM_1);
@@ -47,9 +47,9 @@ void hht_uart_init_3000(void) {
 
     ESP_ERROR_CHECK(uart_driver_install(UART_NUM_1, 4096, 4096, 0, NULL, 0));
     ESP_ERROR_CHECK(uart_param_config(UART_NUM_1, &s_uart_config));
-    ESP_ERROR_CHECK(uart_set_pin(UART_NUM_1, tx, rx, rts, cts));
+    ESP_ERROR_CHECK(uart_set_pin(UART_NUM_1, tx, rx, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
-    ESP_LOGI(TAG, "UART1 (HHT3000) ready (TX=%d RX=%d)", tx, rx);
+    ESP_LOGI(TAG, "UART1 (HHT3000) Command UART TX=%d RX=%d (IO13/IO14 → STM32 PA10/PA9)", tx, rx);
     g_hht_uart_ready = true;
 }
 
@@ -73,6 +73,17 @@ void hht_uart_flush_rx(void) {
         return;
     }
     uart_flush_input(UART_NUM_1);
+}
+
+size_t hht_uart_rx_buffered_bytes(void) {
+    size_t n = 0;
+    if (!g_hht_uart_ready) {
+        return 0;
+    }
+    if (uart_get_buffered_data_len(UART_NUM_1, &n) != ESP_OK) {
+        return 0;
+    }
+    return n;
 }
 
 int hht_uart_read(uint8_t *buf, size_t len, uint32_t timeout_ms) {

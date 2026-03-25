@@ -34,13 +34,13 @@ typedef struct {
     int hht_rts;
     int hht_cts;
 
-    /* HHT 3000 전용 핀 (WB100과 동일 UART1, 배타 사용 시 TX/RX만 4/5로 사용) */
+    /* 레거시: HHT3000는 아래 cmd_txd/cmd_rxd 를 사용 (hht_uart_init_3000). 유지만 함 */
     int hht3000_rx;
     int hht3000_tx;
     int hht3000_rts;
     int hht3000_cts;
 
-    /* Command UART */
+    /* Command UART — STM32 USART1, HHT-3000(hht_3000), fw_update/stm32_update 와 동일 링크 */
     int cmd_txd;
     int cmd_rxd;
 

@@ -6,10 +6,16 @@
 #include <esp_random.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <sdkconfig.h>
 
 #include "core/hht/hht_uart.h"
 #include "core/hht/hht_display.h"
 #include "core/hht/hht_keys.h"
+
+#if CONFIG_BT_NIMBLE_ENABLED
+#include "protocol/ble_cmd_parser.h"
+#include "protocol/ble_protocol.h"
+#endif
 
 static const char *TAG = "hht_wb100";
 
@@ -113,44 +119,112 @@ void hht_wb100_init(void) {
     hht_keys_init();
 }
 
-void hht_wb100_start_session(void) {
+hht_session_result_t hht_wb100_session_open(void) {
     uint8_t req[8];
     uint8_t resp[8];
 
-    ESP_LOGI(TAG, "start session");
+    ESP_LOGI(TAG, "session open (8-byte handshake)");
     hht_uart_flush();
-    vTaskDelay(pdMS_TO_TICKS(50));
+    vTaskDelay(pdMS_TO_TICKS(HHT_SESSION_SETTLE_MS));
 
     uint8_t req_len = make_session(req);
-    hht_uart_write(req, req_len);
+    int wn = hht_uart_write(req, req_len);
+    if (wn < 0 || (size_t)wn != (size_t)req_len) {
+        ESP_LOGW(TAG, "session request write failed (%d)", wn);
+        return HHT_SESSION_ERR_UART;
+    }
 
     int got = 0;
-    for (int i = 0; i < 5; i++) {
-        int rd = hht_uart_read(resp + got, 8 - got, 100);
+    for (unsigned i = 0; i < HHT_SESSION_WB100_RETRY_MAX; i++) {
+        int rd = hht_uart_read(resp + got, 8 - got, HHT_SESSION_WB100_READ_TIMEOUT_MS);
         if (rd > 0) {
             got += rd;
             if (got >= 8) {
                 break;
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(HHT_SESSION_WB100_RETRY_GAP_MS));
     }
 
     if (got != 8) {
-        ESP_LOGW(TAG, "session response timeout (%d bytes)", got);
-        return;
+        ESP_LOGW(TAG, "session response timeout (%d/8 bytes)", got);
+        return HHT_SESSION_ERR_TIMEOUT;
     }
 
     if (!verify_session(resp, 8)) {
         ESP_LOGW(TAG, "session response verify failed");
-        return;
+        return HHT_SESSION_ERR_PROTOCOL;
     }
 
     ESP_LOGI(TAG, "session response ok");
+    return HHT_SESSION_OK;
 }
 
-void hht_wb100_stop_session(void) {
-    ESP_LOGI(TAG, "stop session");
+/* 2.08 operation_hht_wb100_session.c 와 동일 문자열 (CP_WBVF_NORMAL 기본) */
+static const char s_code_wbvf[] = "WBHHTWBSMARTHHT00012";
+
+void hht_wb100_post_verify_workflow(void) {
+#if CONFIG_BT_NIMBLE_ENABLED
+    uint8_t wb100_attached = 0x01;
+    uint8_t hht3000_off    = 0x00;
+    ble_protocol_send_cmd(ACK_START_HHT_WB100, &wb100_attached, 1);
+    ble_protocol_send_cmd(ACK_START_HHT_3000, &hht3000_off, 1);
+    ESP_LOGI(TAG, "post-verify: BLE 0x8201(01), 0x8203(00)");
+#endif
+
+    vTaskDelay(pdMS_TO_TICKS(50));
+    const char *ok = "OK";
+    int wn         = hht_uart_write((const uint8_t *)ok, strlen(ok));
+    if (wn < 0) {
+        ESP_LOGW(TAG, "post-verify: OK write failed");
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(150));
+
+    wn = hht_uart_write((const uint8_t *)s_code_wbvf, strlen(s_code_wbvf));
+    if (wn < 0) {
+        ESP_LOGW(TAG, "post-verify: code string write failed");
+    }
+
+    uint8_t txb = 0x01;
+    (void)hht_uart_write(&txb, 1);
+    txb = 0x00;
+    hht_uart_flush();
+    (void)hht_uart_write(&txb, 1);
+
+    for (int countdown = 10; countdown > 0; countdown--) {
+        size_t avail = hht_uart_rx_buffered_bytes();
+        if (avail >= 16) {
+            uint8_t stack_buf[256];
+            size_t  to_read = (avail > sizeof(stack_buf)) ? sizeof(stack_buf) : avail;
+            int     rd      = hht_uart_read(stack_buf, to_read, 1000);
+            uint8_t packet_proj[10];
+            memset(packet_proj, 0, sizeof(packet_proj));
+            if (rd >= 16) {
+                memcpy(packet_proj, &stack_buf[6], 9);
+#if CONFIG_BT_NIMBLE_ENABLED
+                ble_protocol_send_cmd(CMD_HHT_PROJ_100, packet_proj, sizeof(packet_proj));
+#endif
+                ESP_LOGI(TAG, "post-verify: CMD_HHT_PROJ_100 (from CP)");
+            } else {
+                ESP_LOGW(TAG, "post-verify: proj read short (%d)", rd);
+#if CONFIG_BT_NIMBLE_ENABLED
+                ble_protocol_send_cmd(CMD_HHT_PROJ_100, packet_proj, sizeof(packet_proj));
+#endif
+            }
+            break;
+        }
+
+        uint8_t packet_proj_empty[10] = {0};
+#if CONFIG_BT_NIMBLE_ENABLED
+        ble_protocol_send_cmd(CMD_HHT_PROJ_100, packet_proj_empty, sizeof(packet_proj_empty));
+#endif
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+void hht_wb100_session_close(void) {
+    ESP_LOGI(TAG, "session close");
     hht_uart_flush();
 }
 
@@ -161,6 +235,17 @@ void hht_wb100_poll(void) {
      * - update display buffer
      * - process key input
      */
+    /*
+     * Key TX cadence policy:
+     * - hht_task loop is ~20ms
+     * - send key every 2 polls (~40ms)
+     * Display RX should run every poll regardless of key traffic.
+     */
+    static uint8_t s_key_tick_div = 0;
+    s_key_tick_div++;
+    if (s_key_tick_div >= 2) {
+        s_key_tick_div = 0;
+        (void)hht_keys_poll();
+    }
     hht_display_poll();
-    hht_keys_poll();
 }

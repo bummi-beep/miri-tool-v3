@@ -40,7 +40,8 @@ static void hht_task(void *arg) {
                 hht_wb100_poll();
                 break;
         }
-        vTaskDelay(pdMS_TO_TICKS(10));
+        /* 2.08 WB100 task cadence: keep main HHT loop around 20ms. */
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 

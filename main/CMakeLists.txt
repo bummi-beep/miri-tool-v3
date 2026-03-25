@@ -37,6 +37,7 @@ idf_component_register(
         "base/sdmmc/sdmmc_init.c"
         "base/spiflash_fs/spiflash_fs.c"
         "core/hht/hht_main.c"
+        "core/hht/hht_session.c"
         "core/hht/hht_wb100.c"
         "core/hht/hht_3000.c"
         "core/hht/hht_uart.c"

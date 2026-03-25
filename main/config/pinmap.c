@@ -37,13 +37,13 @@ static const pinmap_t g_pinmap = {
     .hht_rts = 11, /* IO11 */
     .hht_cts = 12, /* IO12 */
 
-    /* HHT 3000 전용 핀 (WB100과 같은 UART1, 배타 사용 시 핀만 전환: TX=4, RX=5) */
-    .hht3000_tx = 4,   /* IO4 */
-    .hht3000_rx = 5,   /* IO5 */
+    /* hht_uart_init_3000 은 cmd_txd/cmd_rxd 만 사용 (IO13/14). 값 동기화용 */
+    .hht3000_tx = 13,
+    .hht3000_rx = 14,
     .hht3000_rts = -1,
     .hht3000_cts = -1,
 
-    /* Command UART */
+    /* Command UART: ESP32 IO13(TXD)→STM32 RX(PA10), IO14(RXD)←STM32 TX(PA9) */
     .cmd_txd = 13, /* IO13 */
     .cmd_rxd = 14, /* IO14 */
 

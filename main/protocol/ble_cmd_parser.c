@@ -11,6 +11,7 @@
 #include <esp_err.h>
 #include <esp_vfs_fat.h>
 #include <ctype.h>
+#include <sdkconfig.h>
 #if CONFIG_BT_NIMBLE_ENABLED
 #include <services/gap/ble_svc_gap.h>
 #endif
@@ -385,7 +386,6 @@ static bool ble_cmd_is_stop(uint16_t cmd) {
 static bool ble_cmd_is_hht_action(uint16_t cmd) {
     switch (cmd) {
         case CMD_HHT_BTN:
-        case CMD_HHT_MSG_100:
         case CMD_HHT_PARAMS:
         case CMD_HHT_PROJ_100:
         case CMD_HHT_VER_CP_100:
@@ -398,11 +398,57 @@ static bool ble_cmd_is_hht_action(uint16_t cmd) {
     }
 }
 
+static uint16_t ble_cmd_normalize_compat(uint16_t cmd)
+{
+    /* 일부 클라이언트/브리지의 엔디안 불일치 대응 (핵심 HHT 명령만 보정) */
+    switch (cmd) {
+    case 0x0302: /* swap(0x0203) */
+        ESP_LOGW(TAG, "compat: swapped cmd 0x%04x -> 0x%04x", cmd, CMD_START_HHT_3000);
+        return CMD_START_HHT_3000;
+    case 0x0402: /* swap(0x0204) */
+        ESP_LOGW(TAG, "compat: swapped cmd 0x%04x -> 0x%04x", cmd, CMD_STOP_HHT_3000);
+        return CMD_STOP_HHT_3000;
+    case 0x6400: /* swap(0x0064) */
+        ESP_LOGW(TAG, "compat: swapped cmd 0x%04x -> 0x%04x", cmd, CMD_HHT_BTN);
+        return CMD_HHT_BTN;
+    case 0x6480: /* swap(0x8064) */
+        ESP_LOGW(TAG, "compat: swapped cmd 0x%04x -> 0x%04x", cmd, ACK_HHT_BTN);
+        return ACK_HHT_BTN;
+    default:
+        return cmd;
+    }
+}
+
+static uint16_t ble_hht_start_ack_cmd(uint16_t cmd)
+{
+    switch (cmd) {
+    case CMD_START_HHT_WB100:
+        return ACK_START_HHT_WB100;
+    case CMD_START_HHT_3000:
+        return ACK_START_HHT_3000;
+    case CMD_START_HHT_100:
+    default:
+        return ACK_START_HHT_100;
+    }
+}
+
+static uint16_t ble_hht_stop_ack_cmd(uint16_t cmd)
+{
+    switch (cmd) {
+    case CMD_STOP_HHT_WB100:
+        return ACK_STOP_HHT_WB100;
+    case CMD_STOP_HHT_3000:
+        return ACK_STOP_HHT_3000;
+    case CMD_STOP_HHT_100:
+    default:
+        return ACK_STOP_HHT_100;
+    }
+}
+
 role_t ble_cmd_to_role(uint16_t cmd) {
     switch (cmd) {
         case CMD_START_HHT_100:
         case CMD_STOP_HHT_100:
-        case CMD_HHT_MSG_100:
         case CMD_HHT_BTN:
         case CMD_START_HHT_WB100:
         case CMD_STOP_HHT_WB100:
@@ -448,13 +494,29 @@ void ble_cmd_handle(uint16_t cmd) {
 
 void ble_cmd_handle_with_payload(uint16_t cmd, const uint8_t *payload, size_t payload_len) {
 
+    cmd = ble_cmd_normalize_compat(cmd);
     ESP_LOGI(TAG, "BLE RX : 0x%04x",cmd);
 
+    /*
+     * 일부 앱/브리지에서는 버튼 입력을 CMD(0x0064) 대신 ACK(0x8064)로 보내는 경우가 있다.
+     * WB100/HHT3000 공통으로 호환 처리한다.
+     */
+    if (cmd == ACK_HHT_BTN) {
+        ESP_LOGW(TAG, "compat: ACK_HHT_BTN(0x%04x) accepted as key input", cmd);
+        cmd = CMD_HHT_BTN;
+    }
+
+    /*
+     * ACK(0x8xxx)는 장치->앱 방향 코드다.
+     * 앱/브리지 에코는 무시. 0x8063(구 CMD_HHT_MSG_100)도 2.08처럼 RX 처리하지 않음 —
+     * LCD는 UART+hht_display_poll·주기 전송으로만 0x0063 notify.
+     */
+    if ((cmd & 0x8000u) != 0u) {
+        ESP_LOGW(TAG, "ignore ack-like cmd from BLE RX: 0x%04x", cmd);
+        return;
+    }
+
     if (ble_cmd_is_hht_action(cmd)) {
-        if (cmd == CMD_HHT_MSG_100) {
-            ESP_LOGI(TAG, "HHT msg rx from BLE (len=%u)", (unsigned)payload_len);
-            return;
-        }
         if (cmd == CMD_HHT_BTN) {
             if (!payload || payload_len < 1) {
                 ESP_LOGW(TAG, "HHT key cmd missing payload");
@@ -492,7 +554,22 @@ void ble_cmd_handle_with_payload(uint16_t cmd, const uint8_t *payload, size_t pa
         if (cmd == CMD_STOP_HHT_100 || cmd == CMD_STOP_HHT_WB100 || cmd == CMD_STOP_HHT_3000) {
             ESP_LOGI(TAG, "HHT stop");
             role_dispatcher_clear();
-            ble_protocol_send_cmd(ACK_STOP_HHT_100, NULL, 0);
+            uint16_t ack = ble_hht_stop_ack_cmd(cmd);
+#if CONFIG_BT_NIMBLE_ENABLED
+            /*
+             * WB100 정지: 2.08 스타일 미부착 알림 — 0x8201(00) 후 정지 ACK(0x8202, 1바이트 0).
+             */
+            if (cmd == CMD_STOP_HHT_WB100) {
+                uint8_t z = 0;
+                ble_protocol_send_cmd(ACK_START_HHT_WB100, &z, 1);
+                ble_protocol_send_cmd(ack, &z, 1);
+            } else {
+                ble_protocol_send_cmd(ack, NULL, 0);
+            }
+            if (cmd == CMD_STOP_HHT_3000 && ack != ACK_STOP_HHT_100) {
+                ble_protocol_send_cmd(ACK_STOP_HHT_100, NULL, 0);
+            }
+#endif
             return;
         }
         if (cmd == CMD_PROGRAM_STOP_PHONE_ESP32) {
@@ -525,8 +602,23 @@ void ble_cmd_handle_with_payload(uint16_t cmd, const uint8_t *payload, size_t pa
                 hht_set_type(HHT_TYPE_100);
             }
             ESP_LOGI(TAG, "HHT start (type=%d)", hht_get_type());
+            uint16_t ack = ble_hht_start_ack_cmd(cmd);
+            /*
+             * WB100(0x0201): 8바이트 세션 성공 후 hht_wb100_post_verify_workflow()에서
+             * 0x8201(01)·0x8203(00)·CMD_HHT_PROJ_100 를내므로 여기서는 즉시 ACK 하지 않음.
+             * HHT100/3000 은 기존처럼 즉시 ACK.
+             */
+#if CONFIG_BT_NIMBLE_ENABLED
+            if (cmd != CMD_START_HHT_WB100) {
+                ble_protocol_send_cmd(ack, NULL, 0);
+                if (cmd == CMD_START_HHT_3000 && ack != ACK_START_HHT_100) {
+                    ble_protocol_send_cmd(ACK_START_HHT_100, NULL, 0);
+                }
+            } else {
+                (void)ack;
+            }
+#endif
             role_dispatcher_request(ROLE_HHT, ROLE_SOURCE_BLE);
-            ble_protocol_send_cmd(ACK_START_HHT_100, NULL, 0);
             return;
         }
         role_t role = ble_cmd_to_role(cmd);
